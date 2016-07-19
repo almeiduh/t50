@@ -61,10 +61,12 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
   tcpopt = tcpolen + TCPOLEN_PADDING(tcpolen);
 
   *size = sizeof(struct iphdr)  +
-          sizeof(struct tcphdr) +
-          sizeof(struct psdhdr) +
-          tcpopt                +
-          greoptlen;
+          sizeof(struct tcphdr);
+
+  // Only send psdhdr + tcpopt + greoptlen if not a SYN
+  if (co->tcp.syn == 0) {
+       *size += sizeof(struct psdhdr) + tcpopt + greoptlen;
+  }
 
   /* Try to reallocate packet, if necessary */
   alloc_packet(*size);
@@ -91,7 +93,7 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
   tcp          = (struct tcphdr *)((unsigned char *)(ip + 1) + greoptlen);
   tcp->source  = htons(IPPORT_RND(co->source));
   tcp->dest    = htons(IPPORT_RND(co->dest));
-  tcp->res1    = TCP_RESERVED_BITS;
+  tcp->res1    = 0x0000;//  TCP_RESERVED_BITS; -> should be zero
   tcp->doff    = co->tcp.doff ? co->tcp.doff : ((sizeof(struct tcphdr) + tcpopt) / 4);
   tcp->fin     = (co->tcp.fin != 0);
   tcp->syn     = (co->tcp.syn != 0);
