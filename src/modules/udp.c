@@ -19,7 +19,13 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <assert.h>
+#include <linux/udp.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 /**
  * UDP packet header configuration.

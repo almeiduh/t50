@@ -18,11 +18,16 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef __IP_INC__
-#define __IP_INC__
+#ifndef __IGMP_H__
+#define __IGMP_H__
 
-#include <common.h>
+/** IGMP Header DEFINITIONS. */
+#define IGMPV3_TLEN_NSRCS(foo) ((foo) * sizeof(in_addr_t))
 
-struct iphdr *ip_header(void *, size_t, const struct config_options *__restrict__);
+/** Calculating IGMPv3 Header length */
+#define igmpv3_hdr_len(foo, bar) \
+  ((((foo) == IGMPV3_HOST_MEMBERSHIP_REPORT) ? \
+    sizeof(struct igmpv3_report) + sizeof(struct igmpv3_grec) : \
+    sizeof(struct igmpv3_query)) + IGMPV3_TLEN_NSRCS((bar)))
 
-#endif
+#endif  /* __IGMP_H */

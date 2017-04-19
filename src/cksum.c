@@ -1,5 +1,5 @@
 /* vim: set ts=2 et sw=2 : */
-/** @file cidr.c */
+/** @file cksum.c */
 /*
  *  T50 - Experimental Mixed Packet Injector
  *
@@ -19,10 +19,10 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <t50_cksum.h>
 
 /**
- * Calculates checksum. 
+ * Calculates checksum.
  *
  * RFC 1071 compliant checksum routine.
  *
@@ -34,11 +34,11 @@ uint16_t cksum(void *data, size_t length)
 {
   uint32_t sum;
   uint16_t *p = data;
-  size_t rem;
+  int rem;
 
   sum = 0;
-  rem = length & 1;
-  length /= 2;
+  rem = length & 1; // if there is a remaining byte this will be true.
+  length /= 2;      // lenth contains # of words.
 
   /* Accumulate all 16 bit words on buffer. */
   while (length--)
@@ -54,3 +54,27 @@ uint16_t cksum(void *data, size_t length)
 
   return ~sum;
 }
+/*
+  This could be implemented (x86-64) as:
+
+  cksum:
+    xor eax,eax
+    mov ecx,esi
+    shr ecx,1
+  .loop:
+    jz  .loop_end
+    mov bx,[rdi]
+    add ax,bx
+    adc ax,0
+    add rdi,2
+    dec ecx
+    jmp .loop
+  .loop_end:
+    test esi,1
+    jz  .end
+    movzx bx,byte [rdi]
+    add ax,bx
+    adc ax,0
+  .end:
+    ret    
+*/

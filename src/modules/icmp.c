@@ -19,7 +19,14 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <assert.h>
+#include <linux/ip.h>
+#include <linux/icmp.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 /**
  * ICMP packet header configuration.
@@ -66,9 +73,9 @@ void icmp(const struct config_options *const __restrict__ co, size_t *size)
   if (co->icmp.type == ICMP_REDIRECT)
     switch (co->icmp.code)
     {
-      case ICMP_REDIR_HOST:
-      case ICMP_REDIR_NET:
-        icmp->un.gateway = htonl(INADDR_RND(co->icmp.gateway));
+    case ICMP_REDIR_HOST:
+    case ICMP_REDIR_NET:
+      icmp->un.gateway = htonl(INADDR_RND(co->icmp.gateway));
     }
 
   icmp->checksum = 0;

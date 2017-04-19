@@ -19,7 +19,14 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <assert.h>
+#include <linux/ip.h>
+#include <t50_defines.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 /**
  * IPSec packet header configuration.
@@ -32,7 +39,7 @@
 void ipsec(const struct config_options *const __restrict__ co, size_t *size)
 {
   /* IPSec AH Integrity Check Value (ICV). */
-  #define IP_AH_ICV (sizeof(uint32_t) * 3)
+#define IP_AH_ICV (sizeof(uint32_t) * 3)
 
   size_t greoptlen,   /* GRE options size. */
          esp_data,    /* IPSec ESP Data Encrypted (RANDOM). */

@@ -19,7 +19,17 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <t50_defines.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_errors.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 /*
  * prototypes.
@@ -95,17 +105,17 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
   tcp->dest    = htons(IPPORT_RND(co->dest));
   tcp->res1    = 0x0000;//  TCP_RESERVED_BITS; -> should be zero
   tcp->doff    = co->tcp.doff ? co->tcp.doff : ((sizeof(struct tcphdr) + tcpopt) / 4);
-  tcp->fin     = (co->tcp.fin != 0);
-  tcp->syn     = (co->tcp.syn != 0);
+  tcp->fin     = co->tcp.fin;
+  tcp->syn     = co->tcp.syn;
   tcp->seq     = co->tcp.syn ? htonl(__RND(co->tcp.sequence)) : 0;
-  tcp->rst     = (co->tcp.rst != 0);
-  tcp->psh     = (co->tcp.psh != 0);
-  tcp->ack     = (co->tcp.ack != 0);
+  tcp->rst     = co->tcp.rst;
+  tcp->psh     = co->tcp.psh;
+  tcp->ack     = co->tcp.ack;
   tcp->ack_seq = co->tcp.ack ? htonl(__RND(co->tcp.acknowledge)) : 0;
-  tcp->urg     = (co->tcp.urg != 0);
+  tcp->urg     = co->tcp.urg;
   tcp->urg_ptr = co->tcp.urg ? htons(__RND(co->tcp.urg_ptr)) : 0;
-  tcp->ece     = (co->tcp.ece != 0);
-  tcp->cwr     = (co->tcp.cwr != 0);
+  tcp->ece     = co->tcp.ece;
+  tcp->cwr     = co->tcp.cwr;
   tcp->window  = htons(__RND(co->tcp.window));
   tcp->check   = 0; /* Needed 'cause of cksum() call */
 
@@ -229,7 +239,7 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
      * incarnation of the connection.  Its  SEG.CC  value  is  the TCB.CCsend
      *  value from the sender's TCB.
      */
-    tcp->syn     = 1;
+    tcp->syn     = true;
     tcp->seq     = htonl(__RND(co->tcp.sequence));
   }
 
@@ -268,7 +278,7 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
                                 __RND(co->tcp.cc_new) :
                                 __RND(co->tcp.cc_echo));
 
-    tcp->syn = 1;
+    tcp->syn = true;
     tcp->seq = htonl(__RND(co->tcp.sequence));
 
     /*
@@ -294,7 +304,7 @@ void tcp(const struct config_options *const __restrict__ co, size_t *size)
        * contained a CC or CC.NEW option.  Its SEG.CC value is the SEG.CC value
        * from the initial SYN.
        */
-      tcp->ack     = 1;
+      tcp->ack     = true;
       tcp->ack_seq = htonl(__RND(co->tcp.acknowledge));
     }
   }

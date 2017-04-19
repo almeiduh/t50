@@ -19,7 +19,8 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <stdio.h>
+#include <t50_modules.h>
 
 /** RSVP options help. */
 void rsvp_help(void)

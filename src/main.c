@@ -19,11 +19,29 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <netinet/in.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <sys/wait.h> /* POSIX.1 compliant */
 #ifdef __HAVE_DEBUG__
 #include <linux/if_ether.h>
 #endif
+#include <configuration.h>
+#include <t50_defines.h>
+#include <t50_typedefs.h>
+#include <t50_config.h>
+#include <t50_netio.h>
+#include <t50_errors.h>
+#include <t50_cidr.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 static pid_t pid = -1;      /* -1 is a trick used when __HAVE_TURBO__ isn't defined. */
 static sig_atomic_t child_is_dead = 0; /* Used to kill child process if necessary. */
@@ -37,7 +55,7 @@ _NOINLINE static const char *       get_month(unsigned);
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 /**
- * Main function launches all T50 modules 
+ * Main function launches all T50 modules
  */
 int main(int argc, char *argv[])
 {
@@ -45,14 +63,16 @@ int main(int argc, char *argv[])
   struct cidr           *cidr_ptr;
   modules_table_t       *ptbl;
   int                   proto; /* Used on main loop. */
+  time_t                lt;
+  struct tm             *tm;
 
-  /* Parse_command_line returns ONLY if there are no errors. 
+  /* Parse_command_line returns ONLY if there are no errors.
      This must be called before testing user privileges. */
   co = parse_command_line(argv);
 
   /* User must have root privileges to run T50, unless --help or --version options are found on command line. */
   if (getuid())
-    fatal_error("User must have root priviledge to run.");
+    fatal_error("User must have root privilege to run.");
 
   /* General initializations. */
   initialize(co);
@@ -69,22 +89,21 @@ int main(int argc, char *argv[])
   if (co->turbo)
   {
     /* if it's necessary to fork a new process... */
-    if ((co->ip.protocol == IPPROTO_T50 && 
+    if ((co->ip.protocol == IPPROTO_T50 &&
          co->threshold > (threshold_t)get_number_of_registered_modules()) ||
-        (co->ip.protocol != IPPROTO_T50 && 
+        (co->ip.protocol != IPPROTO_T50 &&
          co->threshold > 1))
     {
       threshold_t new_threshold;
 
       if ((pid = fork()) == -1)
-        #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
         fatal_error("Error creating child process: \"%s\".\nExiting..", strerror(errno));
-        #else
+#else
         fatal_error("Error creating child process");
-        #endif
+#endif
 
-      /* Divide the process iterations in main loop between processes. 
-         Since we have only 2 processes, max, i'll divide by 2. */
+      /* Divide the process iterations in main loop between both processes. */
       new_threshold = co->threshold / 2;
 
       /* Don't let parent process get the extra packet if threshold is odd. */
@@ -97,20 +116,17 @@ int main(int argc, char *argv[])
   }
 #endif  /* __HAVE_TURBO__ */
 
-  /* Setting the priority to both parent and child process to highly favorable scheduling value. */
+  /* Setting the priority to both parent and child process. */
   if (setpriority(PRIO_PROCESS, PRIO_PROCESS, -15)  == -1)
-  #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("Error setting process priority: \"%s\".\nExiting..", strerror(errno));
-  #else
+#else
     fatal_error("Error setting process priority");
-  #endif
+#endif
 
   /* Show launch info only for parent process. */
   if (!IS_CHILD_PID(pid))
   {
-    time_t lt;
-    struct tm *tm;
-
     /* Getting the local time. */
     lt = time(NULL);
     tm = localtime(&lt);
@@ -125,37 +141,28 @@ int main(int argc, char *argv[])
            tm->tm_sec);
   }
 
-  /* NOTE: Changed the random seed init to here to make
-           sure both processes have their own! */
   SRANDOM();
 
   /* Preallocate packet buffer. */
   alloc_packet(INITIAL_PACKET_SIZE);
 
   /* Selects the initial protocol to use. */
-  /* NOTE: Minor hack: back here from the last branch to avoid page fault using ptbl pointer. */
-  ptbl = selectProtocol(co, &proto);  /* No problems here. ptbl will never be NULL. */
+  ptbl = selectProtocol(co, &proto);
 
-  /* MAIN LOOP: Executed if flooding or if threshold is given. */
+  /* MAIN LOOP */
   while (co->flood || co->threshold)
   {
     /* Holds the actual packet size after module function call. */
     size_t size;
 
     /* Set the destination IP address to RANDOM IP address. */
-    /* NOTE: The previous code did not account for 'hostid == 0'! */
     co->ip.daddr = cidr_ptr->__1st_addr;
-
     if (cidr_ptr->hostid)
-      co->ip.daddr += RANDOM() % cidr_ptr->hostid;  /* FIXME: Shouldn't be +1? */ 
-
-    /* We need the address in network order now. */
+      co->ip.daddr += RANDOM() % cidr_ptr->hostid;  /* FIXME: Shouldn't be +1? */
     co->ip.daddr = htonl(co->ip.daddr);
 
-    /* Calls the 'module' function and sends the packet. */
+    /* Calls the 'module' function to build the packet. */
     co->ip.protocol = ptbl->protocol_id;
-
-    /* Build the packet! */
     ptbl->func(co, &size);
 
 #ifdef __HAVE_DEBUG__
@@ -169,7 +176,7 @@ int main(int argc, char *argv[])
     if (unlikely(!send_packet(packet, size, co)))
 #ifdef __HAVE_DEBUG__
       error("Packet for protocol %s (%zu bytes long) not sent", ptbl->acronym, size);
-      /* continue trying to send other packets on debug mode! */
+    /* continue trying to send other packets on debug mode! */
 #else
       fatal_error("Unspecified error sending a packet");
 #endif
@@ -179,7 +186,7 @@ int main(int argc, char *argv[])
       if ((++ptbl)->func == NULL)
         ptbl = mod_table;
 
-    /* FIX: Just to make sure we do not decrement the threshold value if isn't necessary! */
+    /* Decrement the threshold only if not flooding! */
     if (!co->flood)
       co->threshold--;
   }
@@ -187,9 +194,7 @@ int main(int argc, char *argv[])
   /* Show termination message only for parent process. */
   if (!IS_CHILD_PID(pid))
   {
-    time_t lt;
-    struct tm *tm;
-
+    // NOTE: Notice that for a single process pid will be -1! */
     if (pid > 0)
     {
       if (!child_is_dead)
@@ -198,7 +203,7 @@ int main(int argc, char *argv[])
         alarm(WAIT_FOR_CHILD_TIMEOUT);
 #ifdef __HAVE_DEBUG__
         fputs("\nWaiting for child process to end...\n", stderr);
-#endif        
+#endif
         if (wait(NULL) > 0)
           child_is_dead = 1;
         alarm(0);
@@ -232,7 +237,7 @@ static void signal_handler(int signal)
   /* NOTE: SIGALRM and SIGCHLD will happen only in parent process! */
   if (signal == SIGALRM)
   {
-    if (!IS_CHILD_PID(pid))
+    if (!IS_CHILD_PID(pid))   // to be sure...
       kill(pid, SIGKILL);
     return;
   }
@@ -262,11 +267,11 @@ void initialize(const struct config_options *co)
 #ifndef __HAVE_DEBUG__
   sigaddset(&sigset, SIGTRAP);
 #endif
-  sigprocmask(SIG_BLOCK, &sigset, NULL); 
+  sigprocmask(SIG_BLOCK, &sigset, NULL);
 
   /* --- Initialize signal handlers --- */
   /* All these signals are handled by our handle. */
-  sigaction(SIGPIPE, &sa, NULL); 
+  sigaction(SIGPIPE, &sa, NULL);
   sigaction(SIGINT,  &sa, NULL);
   sigaction(SIGCHLD, &sa, NULL);
   sigaction(SIGALRM, &sa, NULL);
@@ -302,16 +307,19 @@ const char *get_ordinal_suffix(unsigned n)
   if ((n < 11) || (n > 13))
     switch (n % 10)
     {
-    case 1: return suffixes[0];
-    case 2: return suffixes[1];
-    case 3: return suffixes[2];
+    case 1:
+      return suffixes[0];
+    case 2:
+      return suffixes[1];
+    case 3:
+      return suffixes[2];
     }
 
   return suffixes[3];
 }
 
 /* Auxiliary function to return the [constant] string for a month.
-   NOTE: 'n' must be between 0 and 11. 
+   NOTE: 'n' must be between 0 and 11.
    NOTE: This routine is here just 'cause we need months in english. */
 const char *get_month(unsigned n)
 {

@@ -18,18 +18,24 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef __IGMP_H
-#define __IGMP_H 1
+#ifndef __NETIO_H__
+#define __NETIO_H__
 
-#include <common.h>
+#include <stddef.h>
+#include <netinet/in.h>
+#include <t50_typedefs.h>
+#include <t50_config.h>
 
-/** IGMP Header DEFINITIONS. */
-#define IGMPV3_TLEN_NSRCS(foo) ((foo) * sizeof(in_addr_t))
+typedef int socket_t;
 
-/** Calculating IGMPv3 Header length */
-#define igmpv3_hdr_len(foo, bar) \
-  ((((foo) == IGMPV3_HOST_MEMBERSHIP_REPORT) ? \
-    sizeof(struct igmpv3_report) + sizeof(struct igmpv3_grec) : \
-    sizeof(struct igmpv3_query)) + IGMPV3_TLEN_NSRCS((bar)))
+/* Common routines used by code */
+in_addr_t    resolv(char *);         /* Resolve name to ip address. */
+void         create_socket(void);    /* Creates the sending socket */
+void         close_socket(void);     /* Close the previously created socket */
 
-#endif  /* __IGMP_H */
+/* Send the actual packet from buffer, with size bytes, using config options. */
+_Bool send_packet(const void *const,
+                  size_t,
+                  const struct config_options *const __restrict__);
+
+#endif

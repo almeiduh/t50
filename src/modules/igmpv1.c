@@ -19,12 +19,20 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <assert.h>
+#include <linux/ip.h>
+#include <linux/igmp.h>
+#include <t50_defines.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
-/** 
+/**
  * IGMPv1 packet header configuration.
  *
- * This function configures and sends the IGMPv1 packet header. 
+ * This function configures and sends the IGMPv1 packet header.
  *
  * @param co Pointer to T50 configuration structure.
  * @param size Pointer to packet size (updated by the function).

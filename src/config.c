@@ -1,5 +1,5 @@
 /* vim: set ts=2 et sw=2 : */
-/** @file common.c */
+/** @file config.c */
 /*
  *  T50 - Experimental Mixed Packet Injector
  *
@@ -19,11 +19,33 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <inttypes.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <string.h>
 #include <setjmp.h>
 #include <limits.h>
 #include <regex.h>
+#include <errno.h>
+#include <assert.h>
+#include <linux/icmp.h>
+#include <linux/igmp.h>
+#include <linux/dccp.h>
+#include <netinet/in.h>
+#include <netdb.h>
+
+#include <configuration.h>
+#include <t50_typedefs.h>
+#include <t50_defines.h>
+#include <t50_config.h>
+#include <t50_netio.h>
+#include <t50_errors.h>
+#include <t50_cidr.h>
+#include <t50_help.h>
+#include <t50_modules.h>
 
 /* Local prototypes. */
 static int                                check_if_option(char *);
@@ -31,13 +53,13 @@ static int                                check_if_nul_option(char *);
 static void                               check_options_rules(struct config_options *__restrict__);
 _NOINLINE static struct options_table_s * find_option(char *);
 static void                               set_config_option(struct config_options *__restrict__, char *, int, char *);
-_NOINLINE static unsigned int             toULong(char *, char *);
-_NOINLINE static unsigned int             toULongCheckRange(char *, char *, unsigned int, unsigned int);
+_NOINLINE static uint32_t                 toULong(char *, char *);
+_NOINLINE static uint32_t                 toULongCheckRange(char *, char *, uint32_t, uint32_t);
 _NOINLINE static void                     check_list_separators(char *, char *);
 static void                               set_destination_addresses(char *, struct config_options *__restrict__);
 static void                               list_protocols(void);
 static void                               set_default_protocol(struct config_options *__restrict__);
-static int                                get_ip_and_cidr_from_string(char const *const, T50_tmp_addr_t *);
+static _Bool                              get_ip_and_cidr_from_string(char const *const, T50_tmp_addr_t *);
 _NOINLINE static int                      get_dual_values(char *, unsigned long *, unsigned long *, unsigned long, int, char, char *);
 static int                                check_threshold(const struct config_options *const __restrict__);
 static int                                check_for_valid_option(int, int *);
@@ -47,10 +69,6 @@ static int                                check_for_valid_option(int, int *);
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 
 /* Default command line interface options. */
-/* NOTE: Using GCC structure initialization extension to
-         make sure that all fields are initialized correctly. */
-/* NOTE: As C standandard goes, any field not explicitly initialized
-         will be filled with zero. */
 static struct config_options co =
 {
   /* XXX COMMON OPTIONS                                                         */
@@ -137,7 +155,7 @@ static struct config_options co =
     .lsa_age = 360,                  /* default LSA age                        */
     .lsa_type = LSA_TYPE_ROUTER,     /* default LSA header type                */
     .lsa_link_type = LINK_TYPE_PTP,  /* default Router-LSA link type           */
-    .key_id = 1                       /* default authentication key ID          */
+    .key_id = 1                      /* default authentication key ID          */
   }
 
   /* NOTE: Add configuration structured values for new protocols here! */
@@ -403,9 +421,6 @@ static struct options_table_s options[] =
 };
 #pragma GCC diagnostic pop
 
-_NOINLINE static void _parse_command_line_error(char *option)
-{ fatal_error("Option '%s' has no arguments.", option); }
-
 /* Substitutes getConfigOptions() function.
    NOTE: This function expects &argv[0] as the first argument. */
 struct config_options *parse_command_line(char **argv)
@@ -443,19 +458,26 @@ struct config_options *parse_command_line(char **argv)
       /* Is the option need an argument, get the next string. */
       if (!!(next_str = *(argv + 1)))
       {
+        static const char ferrfmt[] =
+          "Option '%s' has no arguments.";
+
         if (ptbl->has_arg)
         {
           if (check_if_nul_option(next_str)) // -- is NOT allowed!
-            _parse_command_line_error(opt);
+            fatal_error(ferrfmt, opt);
           argv++;
         }
         else
         {
           if (!check_if_nul_option(next_str)) // -- is allowed!
             if (!check_if_option(next_str))   // no values allowed!
-              _parse_command_line_error(opt);
+              fatal_error(ferrfmt, opt);
         }
       }
+
+      // FIX: 28-Aug-2016
+      if (ptbl->has_arg && !next_str)
+        fatal_error("option '%s' must have an argument.", opt);
 
       set_config_option(&co, opt, ptbl->id, next_str);
     }
@@ -665,8 +687,7 @@ void get_ip_protocol(struct config_options *co, char *arg)
       ptbl++;
     }
 
-    fprintf(stderr, "Unknown protocol '%s'.\n", arg);
-    exit(EXIT_FAILURE);
+    fatal_error("Unknown protocol %s.", arg);
   }
 }
 
@@ -692,7 +713,7 @@ void set_destination_addresses(char *arg, struct config_options *__restrict__ co
     if ((p = strtok(NULL, "/")) != NULL)
       co->bits = atoi(p); /* NOTE: Range will be checked later. */
     else
-      co->bits = 32;
+      co->bits = CIDR_MAXIMUM;
   }
 }
 
@@ -707,7 +728,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
   {
 #ifdef __HAVE_TURBO__
   case OPTION_TURBO:
-    co->turbo = TRUE;
+    co->turbo = true;
     break;
 #endif
 
@@ -716,27 +737,27 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_FLOOD:
-    co->flood = TRUE;
+    co->flood = true;
     break;
 
   case OPTION_ENCAPSULATED:
-    co->encapsulated = TRUE;
+    co->encapsulated = true;
     break;
 
   case OPTION_BOGUSCSUM:
-    co->bogus_csum = TRUE;
+    co->bogus_csum = true;
     break;
 
   case OPTION_GRE_SEQUENCE_PRESENT:
-    co->gre.S = TRUE;
+    co->gre.S = true;
     break;
 
   case OPTION_GRE_KEY_PRESENT:
-    co->gre.K = TRUE;
+    co->gre.K = true;
     break;
 
   case OPTION_GRE_CHECKSUM_PRESENT:
-    co->gre.C = TRUE;
+    co->gre.C = true;
     break;
 
   case OPTION_GRE_KEY:
@@ -757,25 +778,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->gre.daddr = resolv(arg);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  // Source port.
-  case OPTION_SOURCE:
-    check_list_separators(optname, arg);
-    co->source = toULongCheckRange(optname, arg, 0, 65535);
-    break;
-  // Destination port
-  case OPTION_DESTINATION:
-    check_list_separators(optname, arg);
-    co->dest   = toULongCheckRange(optname, arg, 0, 65535);
-    break;
-  case OPTION_IP_SOURCE:
-    check_list_separators(optname, arg);
-    co->ip.saddr = resolv(arg);
-    break;
-
   case OPTION_IP_TOS:
     co->ip.tos = toULong(optname, arg);
     break;
@@ -792,30 +794,12 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->ip.ttl = toULongCheckRange(optname, arg, 0, 255);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_IP_PROTOCOL:
-    check_list_separators(optname, arg);
-    get_ip_protocol(co, arg);
-    break;
-
   case OPTION_ICMP_TYPE:
     co->icmp.type = toULongCheckRange(optname, arg, 0, 255);
     break;
 
   case OPTION_ICMP_CODE:
     co->icmp.code = toULongCheckRange(optname, arg, 0, 255);
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_ICMP_GATEWAY:
-    check_list_separators(optname, arg);
-    co->icmp.gateway = resolv(arg);
     break;
 
   case OPTION_ICMP_ID:
@@ -834,21 +818,12 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->igmp.code = toULongCheckRange(optname, arg, 0, 255);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_IGMP_GROUP:
-    check_list_separators(optname, arg);
-    co->igmp.group = resolv(arg);
-    break;
-
   case OPTION_IGMP_QRV:
     co->igmp.qrv = toULongCheckRange(optname, arg, 0, 7);
     break;
 
   case OPTION_IGMP_SUPPRESS:
-    co->igmp.suppress = TRUE;
+    co->igmp.suppress = true;
     break;
 
   case OPTION_IGMP_QQIC:
@@ -863,15 +838,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->igmp.sources = toULongCheckRange(optname, arg, 0, 65535);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_IGMP_GREC_MULTICAST:
-    check_list_separators(optname, arg);
-    co->igmp.grec_mca = resolv(arg);
-    break;
-
   case OPTION_IGMP_ADDRESS:
     /* '--igmp-address' can contain a list. */
     for (counter = 0, tmp_ptr = strtok(arg, ",");
@@ -882,35 +848,35 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_TCP_FIN:
-    co->tcp.fin = TRUE;
+    co->tcp.fin = true;
     break;
 
   case OPTION_TCP_SYN:
-    co->tcp.syn = TRUE;
+    co->tcp.syn = true;
     break;
 
   case OPTION_TCP_RST:
-    co->tcp.rst = TRUE;
+    co->tcp.rst = true;
     break;
 
   case OPTION_TCP_PSH:
-    co->tcp.psh = TRUE;
+    co->tcp.psh = true;
     break;
 
   case OPTION_TCP_ACK:
-    co->tcp.ack = TRUE;
+    co->tcp.ack = true;
     break;
 
   case OPTION_TCP_URG:
-    co->tcp.urg = TRUE;
+    co->tcp.urg = true;
     break;
 
   case OPTION_TCP_ECE:
-    co->tcp.ece = TRUE;
+    co->tcp.ece = true;
     break;
 
   case OPTION_TCP_CWR:
-    co->tcp.cwr = TRUE;
+    co->tcp.cwr = true;
     break;
 
   case OPTION_TCP_WINDOW:
@@ -961,20 +927,18 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
   case OPTION_TCP_SACK_EDGE:
     /* NOTE: This option expects 2 values, separated by ':'. */
     co->tcp.options |= TCP_OPTION_SACK_EDGE;
-
     if (get_dual_values(arg, &a, &b, UINT_MAX, 0, ':', optname))
       exit(EXIT_FAILURE);
-
     co->tcp.sack_left = a;
     co->tcp.sack_right = b;
     break;
 
   case OPTION_TCP_MD5_SIGNATURE:
-    co->tcp.md5 = !(co->tcp.auth = FALSE);
+    co->tcp.md5 = !(co->tcp.auth = false);
     break;
 
   case OPTION_TCP_AUTHENTICATION:
-    co->tcp.auth = !(co->tcp.md5 = FALSE);
+    co->tcp.auth = !(co->tcp.md5 = false);
     break;
 
   case OPTION_TCP_AUTH_KEY_ID:
@@ -1025,15 +989,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->rip.family = toULong(optname, arg);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RIP_ADDRESS:
-    check_list_separators(optname, arg);
-    co->rip.address = resolv(arg);
-    break;
-
   case OPTION_RIP_METRIC:
     co->rip.metric = toULong(optname, arg);
     break;
@@ -1048,19 +1003,10 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
 
   case OPTION_RIP_NETMASK:
     co->rip.netmask = resolv(arg);
-    break;  /* Is this correct? */
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RIP_NEXTHOP:
-    check_list_separators(optname, arg);
-    co->rip.next_hop = resolv(arg);
-    break;
+    break;  /* FIXME: Is this correct? */
 
   case OPTION_RIP_AUTHENTICATION:
-    co->rip.auth = TRUE;
+    co->rip.auth = true;
     break;
 
   case OPTION_RIP_AUTH_KEY_ID:
@@ -1088,7 +1034,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_DCCP_EXTEND:
-    co->dccp.ext = TRUE;
+    co->dccp.ext = true;
     break;
 
   case OPTION_DCCP_SEQUENCE_01:
@@ -1131,39 +1077,8 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->rsvp.ttl = toULongCheckRange(optname, arg, 0, 255);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_SESSION_ADDRESS:
-    check_list_separators(optname, arg);
-    co->rsvp.session_addr = resolv(arg);
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_SESSION_PROTOCOL:
-    check_list_separators(optname, arg);
-    co->rsvp.session_proto = toULongCheckRange(optname, arg, 0, 255);
-    break;
-
   case OPTION_RSVP_SESSION_FLAGS:
     co->rsvp.session_flags = toULongCheckRange(optname, arg, 0, 255);
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_SESSION_PORT:
-    check_list_separators(optname, arg);
-    co->rsvp.session_port = toULongCheckRange(optname, arg, 0, 65535);
-    break;
-  case OPTION_RSVP_HOP_ADDRESS:
-    check_list_separators(optname, arg);
-    co->rsvp.hop_addr = resolv(arg);
     break;
 
   case OPTION_RSVP_HOP_IFACE:
@@ -1172,15 +1087,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
 
   case OPTION_RSVP_TIME_REFRESH:
     co->rsvp.time_refresh = toULong(optname, arg);
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_ERROR_ADDRESS:
-    check_list_separators(optname, arg);
-    co->rsvp.error_addr = resolv(arg);
     break;
 
   case OPTION_RSVP_ERROR_FLAGS:
@@ -1210,19 +1116,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
 
   case OPTION_RSVP_STYLE_OPTION:
     co->rsvp.style_opt = toULong(optname, arg);
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_SENDER_ADDRESS:
-    check_list_separators(optname, arg);
-    co->rsvp.sender_addr = resolv(arg);
-    break;
-  case OPTION_RSVP_SENDER_PORT:
-    check_list_separators(optname, arg);
-    co->rsvp.sender_port = toULongCheckRange(optname, arg, 0, 65535);
     break;
 
   case OPTION_RSVP_TSPEC_TRAFFIC:
@@ -1300,15 +1193,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
 
   case OPTION_RSVP_ADSPEC_CONTROLLED:
     co->rsvp.adspec = ADSPEC_CONTROLLED_SERVICE;
-    break;
-
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_RSVP_CONFIRM_ADDR:
-    check_list_separators(optname, arg);
-    co->rsvp.confirm_addr = resolv(arg);
     break;
 
   case OPTION_IPSEC_AH_LENGTH:
@@ -1404,15 +1288,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->eigrp.ver_minor = b;
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_EIGRP_NEXTHOP:
-    check_list_separators(optname, arg);
-    co->eigrp.next_hop = resolv(arg);
-    break;
-
   case OPTION_EIGRP_DELAY:
     co->eigrp.delay = toULong(optname, arg);
     break;
@@ -1443,7 +1318,6 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
       *tmp_ptr++ = '\0';
       co->eigrp.prefix = toULong(optname, tmp_ptr);
     }
-
     co->eigrp.dest = resolv(arg);
     break;
 
@@ -1471,21 +1345,12 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     co->eigrp.ext_flags = toULong(optname, arg);
     break;
 
-  /*
-   * FIXME: The code below expects to deal with lists, but only the first one
-   *        is used...
-   */
-  case OPTION_EIGRP_ADDRESS:
-    check_list_separators(optname, arg);
-    co->eigrp.address = resolv(arg);
-    break;
-
   case OPTION_EIGRP_MULTICAST:
     co->eigrp.multicast = toULong(optname, arg);
     break;
 
   case OPTION_EIGRP_AUTHENTICATION:
-    co->eigrp.auth = TRUE;
+    co->eigrp.auth = true;
     break;
 
   case OPTION_EIGRP_AUTH_KEY_ID:
@@ -1505,7 +1370,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_OSPF_AREA_ID:
-    co->ospf.AID = TRUE;
+    co->ospf.AID = true;
     co->ospf.aid = resolv(arg);
     break;
 
@@ -1603,7 +1468,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_OSPF_DD_INCLUDE_LSA:
-    co->ospf.dd_include_lsa = TRUE;
+    co->ospf.dd_include_lsa = true;
     break;
 
   case OPTION_OSPF_LSA_AGE:
@@ -1611,7 +1476,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_OSPF_LSA_DO_NOT_AGE:
-    co->ospf.lsa_dage = TRUE;
+    co->ospf.lsa_dage = true;
     break;
 
   case OPTION_OSPF_LSA_TYPE:
@@ -1671,7 +1536,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_OSPF_LSA_LARGER:
-    co->ospf.lsa_larger = TRUE;
+    co->ospf.lsa_larger = true;
     break;
 
   case OPTION_OSPF_LSA_FORWARD:
@@ -1703,7 +1568,7 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
     break;
 
   case OPTION_OSPF_AUTHENTICATION:
-    co->ospf.auth = TRUE;
+    co->ospf.auth = true;
     break;
 
   case OPTION_OSPF_AUTH_KEY_ID:
@@ -1713,17 +1578,100 @@ void set_config_option(struct config_options *__restrict__ co, char *optname, in
   case OPTION_OSPF_AUTH_SEQUENCE:
     co->ospf.sequence = toULong(optname, arg);
     break;
+
+  /*
+   * FIXME: These options expect to deal with lists, but only the first item
+   *        is used...
+   */
+  // Source port.
+  case OPTION_SOURCE:
+    check_list_separators(optname, arg);
+    co->source = toULongCheckRange(optname, arg, 0, 65535);
+    break;
+  // Destination port
+  case OPTION_DESTINATION:
+    check_list_separators(optname, arg);
+    co->dest   = toULongCheckRange(optname, arg, 0, 65535);
+    break;
+  case OPTION_IP_SOURCE:
+    check_list_separators(optname, arg);
+    co->ip.saddr = resolv(arg);
+    break;
+  case OPTION_IP_PROTOCOL:
+    check_list_separators(optname, arg);
+    get_ip_protocol(co, arg);
+    break;
+  case OPTION_ICMP_GATEWAY:
+    check_list_separators(optname, arg);
+    co->icmp.gateway = resolv(arg);
+    break;
+  case OPTION_IGMP_GROUP:
+    check_list_separators(optname, arg);
+    co->igmp.group = resolv(arg);
+    break;
+  case OPTION_IGMP_GREC_MULTICAST:
+    check_list_separators(optname, arg);
+    co->igmp.grec_mca = resolv(arg);
+    break;
+  case OPTION_RIP_ADDRESS:
+    check_list_separators(optname, arg);
+    co->rip.address = resolv(arg);
+    break;
+  case OPTION_RIP_NEXTHOP:
+    check_list_separators(optname, arg);
+    co->rip.next_hop = resolv(arg);
+    break;
+  case OPTION_RSVP_SESSION_ADDRESS:
+    check_list_separators(optname, arg);
+    co->rsvp.session_addr = resolv(arg);
+    break;
+  case OPTION_RSVP_SESSION_PROTOCOL:
+    check_list_separators(optname, arg);
+    co->rsvp.session_proto = toULongCheckRange(optname, arg, 0, 255);
+    break;
+  case OPTION_RSVP_ERROR_ADDRESS:
+    check_list_separators(optname, arg);
+    co->rsvp.error_addr = resolv(arg);
+    break;
+  case OPTION_RSVP_SESSION_PORT:
+    check_list_separators(optname, arg);
+    co->rsvp.session_port = toULongCheckRange(optname, arg, 0, 65535);
+    break;
+  case OPTION_RSVP_HOP_ADDRESS:
+    check_list_separators(optname, arg);
+    co->rsvp.hop_addr = resolv(arg);
+    break;
+  case OPTION_RSVP_SENDER_ADDRESS:
+    check_list_separators(optname, arg);
+    co->rsvp.sender_addr = resolv(arg);
+    break;
+  case OPTION_RSVP_SENDER_PORT:
+    check_list_separators(optname, arg);
+    co->rsvp.sender_port = toULongCheckRange(optname, arg, 0, 65535);
+    break;
+  case OPTION_RSVP_CONFIRM_ADDR:
+    check_list_separators(optname, arg);
+    co->rsvp.confirm_addr = resolv(arg);
+    break;
+  case OPTION_EIGRP_NEXTHOP:
+    check_list_separators(optname, arg);
+    co->eigrp.next_hop = resolv(arg);
+    break;
+  case OPTION_EIGRP_ADDRESS:
+    check_list_separators(optname, arg);
+    co->eigrp.address = resolv(arg);
+    break;
   }
 }
 
 /* Tries to convert string to an unsigned value.
    NOTE: Marked as "noinline" because it's big enough! */
-unsigned int toULong(char *optname, char *value)
+uint32_t toULong(char *optname, char *value)
 {
   unsigned long n;
 
-  assert(optname != NULL);
-  assert(value != NULL);
+  if (!value || !*value)
+    return 0UL;
 
   /* strtoul deals ok with hexadecimal, octal and decimal values. */
   errno = 0;    // errno is set only on error, so we have to reset it here.
@@ -1732,22 +1680,27 @@ unsigned int toULong(char *optname, char *value)
   if (errno || n > UINT_MAX)
     fatal_error("Invalid numeric value for option '%s'.", optname);
 
-  return (unsigned int)n;
+  return (uint32_t)n;
 }
 
-/* Tries to convert string to unsigned int, checking range.
+/* Tries to convert string to uint32_t, checking range.
    NOTE: 'min' MUST BE smaller than 'max'.
    NOTE: Marked as "noinline" because it's big enough. */
-unsigned int toULongCheckRange(char *optname, char *value, unsigned int min, unsigned int max)
+uint32_t toULongCheckRange(char *optname, char *value, uint32_t min, uint32_t max)
 {
-  unsigned int n;
+  uint32_t n;
 
-  assert(min < max);
+  if (value && *value)
+  {    
+    if (min > max)
+      fatal_error("Min & Max values when calling toULongCheckRange(\"%s\", \"%s\", %" PRIu32 ", %" PRIu32 ").",
+        optname, value, min, max);
 
-  n = toULong(optname, value);
+    n = toULong(optname, value);
 
-  if (n < min || n > max)
-    fatal_error("Value out of range for option '%s'. Range must be between %u and %u.", optname, min, max);
+    if (n < min || n > max)
+      fatal_error("Value out of range for option '%s'. Range must be between %u and %u.", optname, min, max);
+  }
 
   return n;
 }
@@ -1769,11 +1722,8 @@ void list_protocols(void)
 
   puts("List of supported protocols (--protocol):");
 
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wformat"
   for (i = 1, ptbl = mod_table; ptbl->func; ptbl++)
     printf("\t% 2d - %s\t(%s)\n", i++, ptbl->acronym, ptbl->description);
-  #pragma GCC diagnostic pop
 }
 
 /* POSIX Extended Regular Expression used to match IP addresses with optional CIDR. */
@@ -1795,12 +1745,12 @@ void list_protocols(void)
   }
 
 /* Ok... this is nice and UGLY. */
-int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr)
+_Bool get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr)
 {
   regex_t re;
   regmatch_t rm[6];
   unsigned matches[5];
-  unsigned int i, len;
+  size_t i, len;
   char *t;
   int bits;
 
@@ -1808,24 +1758,25 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
 
   /* Try to compile the regular expression. */
   if (regcomp(&re, IP_REGEX, REG_EXTENDED))
-    return FALSE;
+    return false;
 
   /* Try to execute regex against the addr string. */
   if (regexec(&re, addr, 6, rm, 0))
   {
     regfree(&re);
-    return FALSE;
+    return false;
   }
 
   /* Allocate enough space for temporary string. */
-  if ((t = strdup(addr)) == NULL) error("Cannot allocate temporary string: " __FILE__ ":%d", __LINE__);
+  if ((t = strdup(addr)) == NULL) 
+    error("Cannot allocate temporary string: " __FILE__ ":%d", __LINE__);
 
   /* Convert IP octects matches. */
   len = MATCH_LENGTH(rm[1]);
   COPY_SUBSTRING(t, addr + rm[1].rm_so, len);
   matches[0] = atoi(t);
 
-  bits = 32;  /* default is 32 bits netmask. */
+  bits = CIDR_MAXIMUM;  /* default is 32 bits netmask. */
 
   for (i = 2; i <= 4; i++)
   {
@@ -1854,7 +1805,7 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
       /* if cidr is actually '0', then it is an error! */
       free(t);
       regfree(&re);
-      return FALSE;
+      return false;
     }
   }
   else
@@ -1871,7 +1822,7 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
     if (matches[i] > 255)
     {
       regfree(&re);
-      return FALSE;
+      return false;
     }
 
   /* NOTE: Check 'bits' here! */
@@ -1880,7 +1831,7 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
   {
     error("CIDR must be between %u and %u.\n", CIDR_MINIMUM, CIDR_MAXIMUM);
     regfree(&re);
-    return FALSE;
+    return false;
   }
 
   regfree(&re);
@@ -1893,7 +1844,7 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
                      (matches[0] << 24)) &
                    (0xffffffffUL << (32 - addr_ptr->cidr));
 
-  return TRUE;
+  return true;
 }
 
 /* Convert strings like "10.3" to it's components.
@@ -1907,11 +1858,11 @@ int get_ip_and_cidr_from_string(char const *const addr, T50_tmp_addr_t *addr_ptr
    NOTE: Since this funcion is defined and used in this module, it's marked with
          the attribute "noinline". Because it's big!
 */
-int get_dual_values(char *arg, 
-                    unsigned long *px, unsigned long *py, 
-                    unsigned long max, 
-                    int optional, 
-                    char separator, 
+int get_dual_values(char *arg,
+                    unsigned long *px, unsigned long *py,
+                    unsigned long max,
+                    int optional,
+                    char separator,
                     char *optname)
 {
   /* 'static' because we don't need to allocate these every time! */
@@ -1924,8 +1875,8 @@ int get_dual_values(char *arg,
   /* Error handling... */
   if (setjmp(jb))
   {
-    error("'%s' should be formated as 'n%s'.", optname, optional ? "[.n]" : ".n");
-    return -1;
+    error("'%s' should be formatted as 'n%s'.", optname, optional ? "[.n]" : ".n");
+    return !0;
   }
 
   nseps[0] = ((sep[0] = separator) == '.') ? ':' : '.';
@@ -1945,7 +1896,7 @@ int get_dual_values(char *arg,
   if (setjmp(jb))
   {
     error("'%s' arguments are out of range or invalid.", optname);
-    return -1;
+    return !0;
   }
 
   /* Try to convert the first value. */
@@ -1977,7 +1928,7 @@ int get_dual_values(char *arg,
   if (*px > max || *py > max)
   {
     error("One or both arguments of '%s' option are out of range.", optname);
-    return -1;
+    return !0;
   }
 
   /* Everything ok! */
@@ -1991,11 +1942,9 @@ int check_threshold(const struct config_options *const __restrict__ co)
   threshold_t minThreshold;
 
   if (co->ip.protocol == IPPROTO_T50)
-  {
     /* When sending multiple packets using T50 "protocol", the threshold
        must be greater than the number of protocols! */
     minThreshold = (threshold_t)get_number_of_registered_modules();
-  }
   else
     minThreshold = 1;
 
@@ -2003,7 +1952,7 @@ int check_threshold(const struct config_options *const __restrict__ co)
   {
     error("Protool %s cannot have threshold smaller than %d.",
           mod_table[co->ip.protoname].acronym, minThreshold);
-    return -1;
+    return !0;
   }
 
   return 0;
@@ -2021,7 +1970,7 @@ int check_for_valid_option(int opt, int *list)
     // Scan the valid options list and cheks if 'option' is in it.
     for (; *list; list++)
       if (opt == *list)
-        return 1;
+        return !0;
   }
 
   return 0;

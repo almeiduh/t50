@@ -18,25 +18,10 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef __RIP_H
-#define __RIP_H 1
+#ifndef __ERRORS_H__
+#define __ERRORS_H__
 
-#include <common.h>
+void error(const char * const fmt, ...);
+void fatal_error(const char * const fmt, ...);
 
-#define IPPORT_RIP             520
-#define RIP_HEADER_LENGTH      4
-#define RIP_MESSAGE_LENGTH     20
-#define RIP_AUTH_LENGTH        20
-#define RIP_TRAILER_LENGTH     4
-
-/** Calculating RIP Header length */
-#define rip_hdr_len(foo) \
-  (RIP_HEADER_LENGTH + \
-   RIP_MESSAGE_LENGTH + \
-   ((foo) ? \
-    RIP_AUTH_LENGTH + \
-    RIP_TRAILER_LENGTH + \
-    AUTH_TLEN_HMACMD5 : \
-    0))
-
-#endif  /* __RIP_H */
+#endif

@@ -1,9 +1,8 @@
 /* vim: set ts=2 et sw=2 : */
-/** @file ipsec_help.c */
 /*
  *  T50 - Experimental Mixed Packet Injector
  *
- *  Copyright (C) 2010 - 2015 - T50 developers
+ *  Copyright (C) 2010 - 2014 - T50 developers
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -19,17 +18,23 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <stdio.h>
-#include <t50_modules.h>
+#ifndef __RIP_H__
+#define __RIP_H__
 
-/** IPSec options help. */
-void ipsec_help(void)
-{
-  puts("IPSEC Options:\n"
-       "    --ipsec-ah-length NUM     IPSec AH header length           (default NONE)\n"
-       "    --ipsec-ah-spi NUM        IPSec AH SPI                     (default RANDOM)\n"
-       "    --ipsec-ah-sequence NUM   IPSec AH sequence #              (default RANDOM)\n"
-       "    --ipsec-esp-spi NUM       IPSec ESP SPI                    (default RANDOM)\n"
-       "    --ipsec-esp-sequence NUM  IPSec ESP sequence #             (default RANDOM)\n");
-}
+#define IPPORT_RIP             520
+#define RIP_HEADER_LENGTH      4
+#define RIP_MESSAGE_LENGTH     20
+#define RIP_AUTH_LENGTH        20
+#define RIP_TRAILER_LENGTH     4
 
+/** Calculating RIP Header length */
+#define rip_hdr_len(foo) \
+  (RIP_HEADER_LENGTH + \
+   RIP_MESSAGE_LENGTH + \
+   ((foo) ? \
+    RIP_AUTH_LENGTH + \
+    RIP_TRAILER_LENGTH + \
+    AUTH_TLEN_HMACMD5 : \
+    0))
+
+#endif  /* __RIP_H */

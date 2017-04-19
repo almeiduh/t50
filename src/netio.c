@@ -1,5 +1,5 @@
 /* vim: set ts=2 et sw=2 : */
-/** @file sock.c */
+/** @file netio.c */
 /*
  *  T50 - Experimental Mixed Packet Injector
  *
@@ -19,8 +19,20 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <assert.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <t50_defines.h>
+#include <t50_errors.h>
+#include <t50_netio.h>
+#include <t50_randomizer.h>
 
 /* Maximum number of tries to send the packet. */
 #define MAX_SENDTO_RETRYS  10
@@ -33,6 +45,9 @@ static socket_t fd = -1;
 
 static int wait_for_io(int);
 static int socket_send(int, struct sockaddr_in *, void *, size_t);
+#ifdef SO_SNDBUF
+static int setup_sendbuffer(socket_t *, uint32_t);
+#endif
 
 /**
  * Creates and configure a raw socket.
@@ -40,9 +55,9 @@ static int socket_send(int, struct sockaddr_in *, void *, size_t);
 void create_socket(void)
 {
   socklen_t len;
-  unsigned i, n = 1;  /* FIXME: if I indended, someday, to port
+  uint32_t i, n = 1;  /* FIXME: if I indended, someday, to port
                                 this code to Solaris, I must use
-                                char to n and set to '1'. 
+                                char to n and set to '1'.
 
                                 Must change setsockopt() calls as well. */
   int flag;
@@ -53,30 +68,30 @@ void create_socket(void)
            but on linux will cause an error. */
   if ((fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW)) == -1)
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("Error opening raw socket: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("Error opening raw socket");
-    #endif
+#endif
   }
 
   /* Try to change the socket mode to NON BLOCKING. */
   if ((flag = fcntl(fd, F_GETFL)) == -1)
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("Error getting socket flags: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("Error getting socket flags");
-    #endif
+#endif
   }
 
   if (fcntl(fd, F_SETFL, flag | O_NONBLOCK) == -1)
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("Error setting socket to non-blocking mode: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("Error setting socket to non-blocking mode");
-    #endif
+#endif
   }
 
   /* Setting IP_HDRINCL. */
@@ -84,55 +99,25 @@ void create_socket(void)
            still makes the kernel calculates the checksum and total_length. */
   if ( setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &n, sizeof(n)) == -1 )
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("Error setting socket options: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("Error setting socket options");
-    #endif
+#endif
   }
 
-  /* Taken from libdnet by Dug Song. */
 #ifdef SO_SNDBUF
-  /* Getting SO_SNDBUF. */
-  len = sizeof(n);
-
-  if ( getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &n, &len) == -1 )
-  {
-    #ifdef __HAVE_DEBUG__
-    fatal_error("Error getting socket buffer: \"%s\"", strerror(errno));
-    #else
-    fatal_error("Error getting socket buffer");
-    #endif
-  }
-
-  /* Setting the maximum SO_SNDBUF in bytes.
-   * 128      =  1 Kib
-   * 10485760 = 80 Mib */
-  for (i = n + 128; i < 10485760; i += 128)
-  {
-    /* Setting SO_SNDBUF. */
-    if ( setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &i, sizeof(unsigned int)) == -1 )
-    {
-      if (errno == ENOBUFS)
-        break;
-
-      #ifdef __HAVE_DEBUG__
-      fatal_error("Error setting socket buffer: \"%s\"", strerror(errno));
-      #else
-      fatal_error("Error setting socket buffer");
-      #endif
-    }
-  }
-#endif /* SO_SNDBUF */
+  setup_sendbuffer(&fd, n);
+#endif
 
 #ifdef SO_BROADCAST
   if ( setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &n, sizeof(n)) == -1 )
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("error setting socket broadcast flag: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("error setting socket broadcast flag");
-    #endif
+#endif
   }
 #endif /* SO_BROADCAST */
 
@@ -140,11 +125,11 @@ void create_socket(void)
   /* FIXME: Is it a good idea to ajust the socket priority to 1? */
   if ( setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &n, sizeof(n)) == -1 )
   {
-    #ifdef __HAVE_DEBUG__
+#ifdef __HAVE_DEBUG__
     fatal_error("error setting socket priority: \"%s\"", strerror(errno));
-    #else
+#else
     fatal_error("error setting socket priority");
-    #endif
+#endif
   }
 #endif /* SO_PRIORITY */
 }
@@ -170,9 +155,9 @@ void close_socket(void)
  * @param buffer Pointer to the packet buffer.
  * @param size Size of the buffer.
  * @param co Pointer to configurations for T50.
- * @return TRUE (success) or FALSE (error).
+ * @return true (success) or false (error).
  */
-int send_packet(const void *const buffer,
+_Bool send_packet(const void *const buffer,
                 size_t size,
                 const struct config_options *const __restrict__ co)
 {
@@ -195,11 +180,52 @@ int send_packet(const void *const buffer,
     if (errno == EPERM)
       fatal_error("Error sending packet (Permission!). Please check your firewall rules (iptables?).");
 
-    return FALSE;
+    return false;
   }
 
-  return TRUE;
+  return true;
 }
+
+#ifdef SO_SNDBUF
+/* Taken from libdnet by Dug Song. */
+int setup_sendbuffer(socket_t *fd, uint32_t n)
+{
+  uint32_t i;
+  socklen_t len;
+
+  /* Getting SO_SNDBUF. */
+  len = sizeof(n);
+
+  if ( getsockopt(*fd, SOL_SOCKET, SO_SNDBUF, &n, &len) == -1 )
+  {
+#ifdef __HAVE_DEBUG__
+    fatal_error("Error getting socket buffer: \"%s\"", strerror(errno));
+#else
+    fatal_error("Error getting socket buffer");
+#endif
+  }
+
+  /* Setting the maximum SO_SNDBUF in bytes.
+   * 128      =  1 Kib
+   * 10485760 = 80 Mib */
+  for (i = n + 128; i < 10485760; i += 128)
+  {
+    /* Setting SO_SNDBUF. */
+    errno = 0;
+    if ( setsockopt(*fd, SOL_SOCKET, SO_SNDBUF, &i, sizeof(i)) == -1 )
+    {
+      if (errno == ENOBUFS)
+        break;
+
+#ifdef __HAVE_DEBUG__
+      fatal_error("Error setting socket buffer: \"%s\"", strerror(errno));
+#else
+      fatal_error("Error setting socket buffer");
+#endif
+    }
+  }
+}
+#endif /* SO_SNDBUF */
 
 /*** I realize that EINTR probably never happens, since the signals
      are marked as SA_RESTART, but I want to be sure! */
@@ -211,9 +237,11 @@ static int wait_for_io(int fd)
   struct pollfd pfd = { .fd = fd, .events = POLLOUT };
 
   /* NOTE: Assume poll will not fail. */
-  do {
+  do
+  {
     r = poll(&pfd, 1, TIMEOUT);
-  } while (unlikely(r == -1 && errno == EINTR));
+  }
+  while (unlikely(r == -1 && errno == EINTR));
 
   return r;
 }
@@ -225,25 +253,87 @@ static int socket_send(int fd, struct sockaddr_in *saddr, void *buffer, size_t s
 
   /* Tries to send the packet until it's signal interrupted. */
   /* NOTE: Assume sendto will not fail. */
-  do { 
-    r = sendto(fd, buffer, size, MSG_NOSIGNAL, saddr, sizeof(struct sockaddr_in));
-  } while (unlikely(r == -1 && errno == EINTR));
+  do
+  {
+    r = sendto(fd, buffer, size, MSG_NOSIGNAL, (struct sockaddr *)saddr, sizeof(struct sockaddr_in));
+  }
+  while (unlikely(r == -1 && errno == EINTR));
 
   /* If it wasn't interrupted, tries to send the packet again. */
   /* NOTE: Assume previous sendto will not fail. */
   while (unlikely(r == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)))
   {
-    do {
+    do
+    {
       if ((r = wait_for_io(fd)) == -1)
         goto socket_send_exit;
-    } while (unlikely(!r));
+    }
+    while (unlikely(!r));
 
     /* ... and tries to send again. */
-    do {
-      r = sendto(fd, buffer, size, MSG_NOSIGNAL, saddr, sizeof(struct sockaddr_in));
-    } while (unlikely(r == -1 && errno == EINTR));
+    do
+    {
+      r = sendto(fd, buffer, size, MSG_NOSIGNAL, (struct sockaddr *)saddr, sizeof(struct sockaddr_in));
+    }
+    while (unlikely(r == -1 && errno == EINTR));
   }
 
 socket_send_exit:
   return r;
 }
+
+/**
+ * IPv4 name resolver using getaddrinfo().
+ *
+ * Since T50 don't support IPv6 addresses, this routine will
+ * try to get only the first IPv6 address mapped to IPv4, if
+ * no IPv4 address can be found.
+ *
+ * @param name The name, as in "www.target.com"...
+ * @return IPv4 address found (in network order), or 0 if not found.
+ */
+in_addr_t resolv(char *name)
+{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+  /* Hints getaddrinfo() to return only IPv4 compatible addresses. */
+  struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_flags = AI_ALL | AI_V4MAPPED },
+  *res, *res0 = NULL;
+#pragma GCC diagnostic pop
+
+  in_addr_t addr = 0;
+  int err;
+
+  assert(name != NULL);
+
+  if ((err = getaddrinfo(name, NULL, &hints, &res0)) != 0)
+  {
+    if (res0)
+      freeaddrinfo(res0);
+
+    error("Error on resolv(). getaddrinfo() reports: %s.", gai_strerror(err));
+  }
+
+  /* scan all the list. */
+  for (res = res0; res; res = res->ai_next)
+  {
+    switch (res->ai_family)
+    {
+    case AF_INET:
+      addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+      goto end_loop;
+
+    case AF_INET6:
+      if (!addr)
+        addr = ((struct sockaddr_in6 *)res->ai_addr)->sin6_addr.s6_addr32[3];
+    }
+  }
+end_loop:
+
+  // Free the linked list.
+  if (res0)
+    freeaddrinfo(res0);
+
+  return addr;
+}
+

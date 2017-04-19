@@ -21,31 +21,24 @@
 #ifndef __DEFINES_INCLUDED__
 #define __DEFINES_INCLUDED__
 
-/* Boolean aliases. */
-#define FALSE 0
-#define TRUE  (!0)
-#define OFF   0
-#define ON    (!0)
+#define _NOINLINE __attribute__((noinline))
 
 /**
  * Amount of time, in seconds, to wait for child process termination.
  */
 #define WAIT_FOR_CHILD_TIMEOUT  5
 
-/** 
+/**
  * Initial packet buffer preallocation size (2 kB).
  *
- * This size should be sufficient for all packets. 
- * MTU usually is 1500 bytes long, over ethernet! 
+ * This size should be sufficient for all packets.
+ * MTU usually is 1500 bytes long, over ethernet!
  */
 #define INITIAL_PACKET_SIZE 2048
 
-#define CIDR_MINIMUM 8
-#define CIDR_MAXIMUM 32 // fix #7
-
 #define MAXIMUM_IP_ADDRESSES  ((1U << 24) - 1)
 
-/* #define INADDR_ANY 0 */ /* NOTE: Already defined @ linux/in.h */
+/* #define INADDR_ANY 0 */ // NOTE: Already defined in multiple headers (linux/in.h & netinet/in.h).
 #define IPPORT_ANY 0
 
 /* Global common protocol definitions used by code */
@@ -57,16 +50,10 @@
 
 /* T50 DEFINITIONS. */
 #define IPPROTO_T50        69
-#define FIELD_MUST_BE_NULL NULL
 #define FIELD_MUST_BE_ZERO 0
 
 /** Macro used to test bitmasks */
 #define TEST_BITS(x,bits) ((x) & (bits))
-
-/* Randomizer macros and function */
-#define __RND(foo)      (((foo) == 0) ? RANDOM() : (foo))
-#define INADDR_RND(foo) __RND((foo))
-#define IPPORT_RND(foo) __RND((foo))
 
 /** Used to test if "pid" from fork() is from a child process. */
 /* NOTE: fork returns always 0 for the child process. */
@@ -76,7 +63,7 @@
          only tells the compiler to privilege one form of conditional jump
          over another, depending how likely or ulikely the criteria is true
          or false!. No actual hardware hints are emitted. */
-#ifndef unlikely 
+#ifndef unlikely
 #define unlikely(c) __builtin_expect(!!(c), 0)
 #endif
 #ifndef likely

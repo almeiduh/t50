@@ -19,7 +19,9 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <stdio.h>
+#include <sys/socket.h>
+#include <t50_modules.h>
 
 /** RIP options help. */
 void rip_help(void)

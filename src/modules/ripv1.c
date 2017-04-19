@@ -21,7 +21,15 @@
 
 #define RIPVERSION 1
 
-#include <common.h>
+#include <assert.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include <t50_defines.h>
+#include <t50_config.h>
+#include <t50_cksum.h>
+#include <t50_memalloc.h>
+#include <t50_modules.h>
+#include <t50_randomizer.h>
 
 /**
  * RIPv1 packet header configuration.

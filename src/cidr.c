@@ -19,14 +19,18 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <common.h>
+#include <arpa/inet.h>    // ntohl().
+#include <t50_config.h>
+#include <t50_defines.h>
+#include <t50_cidr.h>
+#include <t50_errors.h>
 
 static struct cidr cidr = {0};
 
 /**
  * CIDR configuration tiny C algorithm.
  *
- * This will setup cidr structure with values in host order. 
+ * This will setup cidr structure with values in host order.
  *
  * @param bits Number of "valid" bits on netmask.
  * @param address IP address from command line (in network order).
@@ -97,7 +101,7 @@ struct cidr *config_cidr(const struct config_options * const __restrict__ co)
     }
 
     netmask = ~(~0U >> co->bits);
-    cidr.__1st_addr = (ntohl(co->ip.daddr) & netmask) + 1; // avoid bit 0 = 0 (loopback).
+    cidr.__1st_addr = (ntohl(co->ip.daddr) & netmask) + 1; // avoid bit 0 = 0.
   }
   else
   {
